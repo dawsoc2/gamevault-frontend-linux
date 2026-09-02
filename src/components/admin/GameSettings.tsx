@@ -7,10 +7,8 @@ import {
   ListboxOption,
   ListboxLabel,
 } from "@/components/tailwind/listbox";
-import {
-  GamevaultGame,
-  GamevaultGameTypeEnum,
-} from "@/api/models/GamevaultGame";
+import { GamevaultGame } from "@/api/models/GamevaultGame";
+import { resolveInstallMode } from "@/components/downloads/install-utils";
 import { UpdateGameDto } from "@/api/models/UpdateGameDto";
 import { MetadataProviderDto } from "@/api/models/MetadataProviderDto";
 import { GameMetadata } from "@/api/models/GameMetadata";
@@ -99,16 +97,11 @@ type InstalledGameInfo = {
 import { getRootPaths } from "@/utils/rootPaths";
 
 function isSetupInstallType(gameType?: string) {
-  return gameType === GamevaultGameTypeEnum.windows_setup;
+  return resolveInstallMode(gameType) === "setup";
 }
 
 function isPortableInstallType(gameType?: string) {
-  return (
-    gameType === GamevaultGameTypeEnum.windows_portable ||
-    gameType === GamevaultGameTypeEnum.linux_portable ||
-    gameType === GamevaultGameTypeEnum.windows_software ||
-    gameType === GamevaultGameTypeEnum.linux_software
-  );
+  return resolveInstallMode(gameType) === "portable";
 }
 
 interface ImageState {
@@ -620,7 +613,7 @@ export function GameSettings({ game, onClose, onGameUpdated, onUninstalled }: Pr
           : {
               title: `Are you sure you want to uninstall '${resolvedTitle}' ?`,
               description:
-                "As this is a Windows Setup Game, you will need to select an uninstall executable manually",
+                "As this is a Setup game, you will need to select an uninstall executable manually",
               affirmativeText: "Yes",
               negativeText: "No",
             },
@@ -682,18 +675,17 @@ export function GameSettings({ game, onClose, onGameUpdated, onUninstalled }: Pr
         }
       }
 
+      // No extension filter: this is an explicit manual pick behind
+      // confirmation dialogs already, and native file choosers hide
+      // anything that doesn't match a listed extension - including
+      // extensionless scripts, e.g. mojosetup's Linux uninstaller is
+      // conventionally just named "uninstall" with no extension at all.
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({
         directory: false,
         multiple: false,
         defaultPath: installedGame.installationDirectory,
         title: "Select Uninstall Executable",
-        filters: [
-          {
-            name: "Executables",
-            extensions: ["exe", "msi", "bat", "cmd", "com"],
-          },
-        ],
       });
 
       if (typeof selected !== "string" || !selected) return;
