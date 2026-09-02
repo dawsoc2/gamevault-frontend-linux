@@ -19,10 +19,16 @@ import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { useNavigate } from "react-router";
 import { Status } from "../api";
 import { applyTheme, getStoredTheme } from "@/utils/theme";
+import { isTauriApp } from "@/utils/tauri";
 
 export function Login() {
   const { loginBasic, loginWithTokens, loading, error } = useAuth();
   const navigate = useNavigate();
+  const oauthUnlistenRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => oauthUnlistenRef.current?.();
+  }, []);
   const devAutologin = getDevAutologinConfig();
   const [server, setServer] = useState(() => {
     return (
@@ -213,7 +219,32 @@ export function Login() {
     try {
       const normalized = normalizeServerUrl(confirmedServer || server);
       if (useSso) {
-        window.location.href = `${normalized}/api/auth/oauth2/login`;
+        if (isTauriApp()) {
+          // Run SSO in a separate window rather than navigating the main
+          // one there: the main window's Tauri capabilities (dialog, fs)
+          // only apply to local app content, so navigating it to the
+          // server's own site would strand it without those permissions
+          // for the rest of the session.
+          oauthUnlistenRef.current?.();
+          const { listen } = await import("@tauri-apps/api/event");
+          const { invoke } = await import("@tauri-apps/api/core");
+          const unlisten = await listen<{
+            access_token: string;
+            refresh_token?: string;
+          }>("oauth2-callback", (event) => {
+            oauthUnlistenRef.current?.();
+            oauthUnlistenRef.current = null;
+            loginWithTokens(normalized, event.payload)
+              .then(() => navigate("/library", { replace: true }))
+              .catch(() => {
+                // error handled in context
+              });
+          });
+          oauthUnlistenRef.current = unlisten;
+          await invoke("oauth2_login", { server: normalized });
+        } else {
+          window.location.href = `${normalized}/api/auth/oauth2/login`;
+        }
         return;
       }
       await loginBasic({ server: normalized, username, password });
