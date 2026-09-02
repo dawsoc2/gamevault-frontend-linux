@@ -247,9 +247,32 @@ pub(crate) fn launch_installation_executable(
   installer_parameters: Option<String>,
 ) -> Result<(), String> {
   let extraction_root = PathBuf::from(extraction_path);
-  let installer_path = extraction_root.join(installer_relative_path.replace('/', "\\"));
+  // installer_relative_path always arrives using '/' (collect_install_candidates
+  // normalizes to that); MAIN_SEPARATOR_STR resolves it per-platform like the
+  // rest of this codebase does (see games.rs). This previously hardcoded '\\'
+  // unconditionally, which broke every installer sitting in a subfolder on
+  // Linux/macOS - '\\' isn't a separator there, so the join produced a single
+  // literal (nonexistent) filename instead of descending into that subfolder.
+  let installer_path = extraction_root.join(
+    installer_relative_path.replace('/', std::path::MAIN_SEPARATOR_STR),
+  );
   if !installer_path.exists() || !installer_path.is_file() {
     return Err("Selected installer does not exist".to_string());
+  }
+
+  // Archive formats often don't preserve the Unix executable bit, so a
+  // freshly-extracted .sh/.run installer may not be runnable yet - mirrors
+  // what make_script_executable already does for post-install launch
+  // executables in games.rs.
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(&installer_path)
+      .map_err(|e| format!("Failed to read installer permissions: {e}"))?
+      .permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    fs::set_permissions(&installer_path, permissions)
+      .map_err(|e| format!("Failed to make installer executable: {e}"))?;
   }
 
   let installation_path_resolved = installation_path.clone();

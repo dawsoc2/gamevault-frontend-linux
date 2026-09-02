@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDownloads, type ActiveDownload } from "@/context/DownloadContext";
 import type { GameMetadata } from "@/api/models/GameMetadata";
-import {
-  GamevaultGameTypeEnum,
-  type GamevaultGameTypeEnum as GameType,
-} from "@/api/models/GamevaultGame";
+import { GamevaultGameTypeEnum } from "@/api/models/GamevaultGame";
 import {
   FORCE_INSTALL_TYPES,
   pickPreferredInstaller,
   resolveInstallMode,
+  type ForcedInstallType,
   type InstallCardState,
 } from "./install-utils";
 
@@ -46,7 +44,7 @@ export function useInstallFlow(download: ActiveDownload) {
   }, [download.gameType]);
 
   const openInstallFlow = useCallback(
-    async (forcedType?: GameType) => {
+    async (forcedType?: ForcedInstallType) => {
       const effectiveType = forcedType || download.gameType;
       const mode = resolveInstallMode(effectiveType);
 

@@ -20,6 +20,7 @@ import type {
   GamevaultGame,
   GamevaultGameTypeEnum,
 } from "@/api/models/GamevaultGame";
+import { resolveInstallMode } from "@/components/downloads/install-utils";
 
 type InstallationStatus =
   "idle" | "copying" | "launching" | "running" | "completed" | "error";
@@ -1523,13 +1524,9 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
               typeof localStorage !== "undefined" &&
               localStorage.getItem("tauri_auto_install") === "1"
             ) {
-              const gameType = d.gameType;
-              const isPortable =
-                gameType === "WINDOWS_PORTABLE" ||
-                gameType === "LINUX_PORTABLE" ||
-                gameType === "WINDOWS_SOFTWARE" ||
-                gameType === "LINUX_SOFTWARE";
-              const isSetup = gameType === "WINDOWS_SETUP";
+              const installMode = resolveInstallMode(d.gameType);
+              const isPortable = installMode === "portable";
+              const isSetup = installMode === "setup";
 
               if (isPortable) {
                 await copyInstallationFilesRef.current?.(gameId);

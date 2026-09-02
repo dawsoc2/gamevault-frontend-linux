@@ -4,7 +4,6 @@ import { Listbox, ListboxLabel, ListboxOption } from "@tw/listbox";
 import { useDownloads, type ActiveDownload } from "@/context/DownloadContext";
 import { useAlertDialog } from "@/context/AlertDialogContext";
 import { ProgressBar } from "@/components/tailwind/progress";
-import type { GamevaultGameTypeEnum as GameType } from "@/api/models/GamevaultGame";
 import {
   ClipboardDocumentIcon,
   ComputerDesktopIcon,
@@ -13,6 +12,7 @@ import {
 import {
   FORCE_INSTALL_TYPES,
   formatGameTypeLabel,
+  type ForcedInstallType,
   type InstallCardState,
 } from "./install-utils";
 
@@ -183,7 +183,7 @@ export function InstallFlow({
           <Listbox
             value={installState.forcedType}
             onChange={(value) =>
-              onUpdate({ forcedType: value as GameType })
+              onUpdate({ forcedType: value as ForcedInstallType })
             }
             aria-label="Forced installation type"
           >
