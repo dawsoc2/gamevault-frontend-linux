@@ -55,6 +55,7 @@ async function generateApiClient() {
     "enumPropertyNaming=snake_case",
     "-p",
     "modelPropertyNaming=snake_case",
+    "--skip-validate-spec",
   ];
 
   const result = spawnSync(process.execPath, [cliJs, ...args], {
