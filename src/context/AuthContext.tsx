@@ -278,14 +278,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const authFetch = useCallback(
     async (input: string, init?: RequestInit) => {
       await ensureFreshToken();
-      const token = authRef.current?.access_token;
-      const headers = new Headers(init?.headers || {});
-      if (token && !headers.has("Authorization"))
-        headers.set("Authorization", "Bearer " + token);
-      headers.set("Accept", "*/*");
-      return fetch(input, { ...(init || {}), headers });
+      const send = () => {
+        const token = authRef.current?.access_token;
+        const headers = new Headers(init?.headers || {});
+        if (token && !headers.has("Authorization"))
+          headers.set("Authorization", "Bearer " + token);
+        headers.set("Accept", "*/*");
+        return fetch(input, { ...(init || {}), headers });
+      };
+      const res = await send();
+      // One transparent retry on 401: an access token can be rejected a few
+      // seconds early (clock skew, a backend that hasn't caught up with the
+      // rotation). Force a refresh and resend once. Skipped in offline mode; a
+      // streaming init.body could not be replayed, but no call site sends one.
+      if (res.status !== 401 || offlineModeRef.current) return res;
+      try {
+        await performRefresh();
+      } catch (e) {
+        applyRefreshFailure(e);
+        return res;
+      }
+      return send();
     },
-    [ensureFreshToken],
+    [ensureFreshToken, performRefresh, applyRefreshFailure],
   );
 
   const loginBasic = useCallback(
