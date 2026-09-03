@@ -4,8 +4,20 @@ import {
   RefreshError,
   classifyRefreshError,
   classifyRefreshStatus,
+  computeNextTokenRefresh,
+  getJwtExpMs,
   shouldRetryRefresh,
 } from "./authTokens";
+
+/** Build an unsigned JWT (`header.payload.sig`) with the given payload. */
+function makeJwt(payload: Record<string, unknown>): string {
+  const enc = (obj: unknown) =>
+    btoa(JSON.stringify(obj))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  return `${enc({ alg: "none" })}.${enc(payload)}.sig`;
+}
 
 describe("classifyRefreshStatus", () => {
   it("treats 400/401/403 as fatal (the refresh token is dead)", () => {
@@ -81,5 +93,46 @@ describe("RefreshError", () => {
     expect(err.kind).toBe("fatal");
     expect(err.status).toBe(401);
     expect(err.message).toBe("token has been revoked");
+  });
+});
+
+describe("getJwtExpMs", () => {
+  it("returns the exp claim in epoch-ms", () => {
+    expect(getJwtExpMs(makeJwt({ exp: 1_700_000_000 }))).toBe(
+      1_700_000_000_000,
+    );
+  });
+
+  it("accepts a capitalised Exp claim", () => {
+    expect(getJwtExpMs(makeJwt({ Exp: 1_700_000_000 }))).toBe(
+      1_700_000_000_000,
+    );
+  });
+
+  it("returns null when there is no usable exp", () => {
+    expect(getJwtExpMs(makeJwt({ sub: "1" }))).toBeNull();
+    expect(getJwtExpMs(makeJwt({ exp: "soon" }))).toBeNull();
+  });
+
+  it("returns null for a non-JWT / garbage string", () => {
+    expect(getJwtExpMs("not.a.jwt")).toBeNull();
+    expect(getJwtExpMs("garbage")).toBeNull();
+    expect(getJwtExpMs("")).toBeNull();
+  });
+});
+
+describe("computeNextTokenRefresh", () => {
+  it("uses the token's real exp claim", () => {
+    const expSec = Math.floor(Date.now() / 1000) + 300;
+    expect(computeNextTokenRefresh(makeJwt({ exp: expSec })).getTime()).toBe(
+      expSec * 1000,
+    );
+  });
+
+  it("falls back to a short window for a token with no readable exp", () => {
+    const floor = Date.now() + 4 * 60_000;
+    const next = computeNextTokenRefresh("garbage").getTime();
+    expect(next).toBeGreaterThanOrEqual(floor);
+    expect(next).toBeLessThanOrEqual(Date.now() + 4 * 60_000 + 2_000);
   });
 });

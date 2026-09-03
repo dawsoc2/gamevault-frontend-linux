@@ -20,6 +20,8 @@ import {
   RefreshError,
   classifyRefreshError,
   classifyRefreshStatus,
+  computeNextTokenRefresh,
+  getJwtExpMs,
   shouldRetryRefresh,
 } from "@/utils/authTokens";
 import { useOnlineStatus } from "@/context/OfflineContext";
@@ -30,6 +32,11 @@ const AUTH_CACHED_USER_KEY = "app_cached_user";
 const REFRESH_TIMEOUT_MS = 15_000;
 /** Backoff before retry attempts 2 and 3 (indices 0 and 1). */
 const REFRESH_RETRY_DELAYS_MS = [1_000, 3_000];
+/**
+ * How far before the access token's expiry to refresh it — used both by the
+ * proactive timer and by isTokenNearExpiry's lazy check so they agree.
+ */
+const REFRESH_LEAD_MS = 90_000;
 
 interface LoginArgs {
   server: string;
@@ -60,61 +67,6 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-
-interface InternalJwtPayload {
-  exp?: number;
-  Exp?: number;
-  iat?: number;
-  Iat?: number;
-  creation?: number;
-  Creation?: number;
-  [k: string]: any;
-}
-
-function base64UrlDecode(segment: string): string {
-  try {
-    let s = segment.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = s.length % 4;
-    if (pad) s += "=".repeat(4 - pad);
-    if (typeof atob === "function") return atob(s);
-    // Fallback minimal polyfill (browser-only target; Node Buffer not available without types)
-    // If atob missing (older env), attempt TextDecoder on Uint8Array decode path
-    if (typeof window === "undefined") return "";
-    // @ts-ignore - TypeScript may not know atob is defined in some envs
-    return atob(s);
-  } catch {
-    return "";
-  }
-}
-function parseJwt(token: string): InternalJwtPayload | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const json = base64UrlDecode(parts[1]);
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-function computeNextTokenRefresh(token: string): Date {
-  const payload = parseJwt(token);
-  if (!payload) return new Date();
-  const exp = payload.Exp ?? payload.exp;
-  const creation =
-    payload.Creation ?? payload.creation ?? payload.iat ?? payload.Iat;
-  const now = Date.now();
-  if (
-    typeof exp === "number" &&
-    typeof creation === "number" &&
-    exp > creation
-  ) {
-    const lifetimeSec = exp - creation;
-    return new Date(now + lifetimeSec * 1000);
-  } else if (typeof exp === "number") {
-    return new Date(exp * 1000);
-  }
-  return new Date();
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [serverUrl, setServerUrl] = useState("");
@@ -212,8 +164,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isTokenNearExpiry = useCallback(() => {
     const nxt = nextTokenRefreshRef.current;
     if (!nxt) return true;
-    const threshold = Date.now() + 60_000;
-    return nxt.getTime() <= threshold;
+    return nxt.getTime() <= Date.now() + REFRESH_LEAD_MS;
   }, []);
 
   const logout = useCallback(() => {
@@ -277,7 +228,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (merged.refresh_token)
         localStorage.setItem(AUTH_REFRESH_STORAGE_KEY, merged.refresh_token);
       authRef.current = merged;
-      nextTokenRefreshRef.current = computeNextTokenRefresh(merged.access_token);
+      nextTokenRefreshRef.current = computeNextTokenRefresh(
+        merged.access_token,
+      );
       offlineModeRef.current = false; // successfully refreshed, exit offline mode
       setAuth(merged);
     })();
@@ -594,6 +547,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return unregister;
   }, [onReconnect, performRefresh, applyRefreshFailure]);
+
+  // Proactively refresh the access token shortly before it expires, so it stays
+  // valid even when nothing is calling authFetch (idle UI, the Rust play-time
+  // tracker, which picks up the new token via useGameTimeTracker). Re-arms
+  // whenever the token changes — i.e. after every successful refresh.
+  useEffect(() => {
+    const token = auth?.access_token;
+    if (!token || offlineModeRef.current) return;
+    const expMs = getJwtExpMs(token);
+    if (expMs === null) return;
+    // Floor the delay so a token that arrives already near expiry (bad server
+    // clock, very short TTL) degrades to a slow refresh loop, not a hot one.
+    const delay = Math.max(15_000, expMs - REFRESH_LEAD_MS - Date.now());
+    const timer = setTimeout(() => {
+      if (offlineModeRef.current) return;
+      void performRefresh().catch(applyRefreshFailure);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [auth?.access_token, performRefresh, applyRefreshFailure]);
 
   const refreshCurrentUser = useCallback(async () => {
     try {

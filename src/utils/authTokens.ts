@@ -62,3 +62,54 @@ export function shouldRetryRefresh(attempt: number, err: unknown): boolean {
     attempt < REFRESH_MAX_ATTEMPTS && classifyRefreshError(err) === "transient"
   );
 }
+
+// ── JWT inspection ───────────────────────────────────────────────────────────
+
+interface JwtPayload {
+  exp?: number;
+  Exp?: number;
+  [k: string]: unknown;
+}
+
+function base64UrlDecode(segment: string): string {
+  try {
+    let s = segment.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = s.length % 4;
+    if (pad) s += "=".repeat(4 - pad);
+    return typeof atob === "function" ? atob(s) : "";
+  } catch {
+    return "";
+  }
+}
+
+function parseJwt(token: string): JwtPayload | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(base64UrlDecode(parts[1]));
+  } catch {
+    return null;
+  }
+}
+
+/** Epoch-ms of the token's `exp` claim, or null if it has none / can't be read. */
+export function getJwtExpMs(token: string): number | null {
+  const payload = parseJwt(token);
+  const exp = payload?.Exp ?? payload?.exp;
+  return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
+}
+
+/** Fallback lifetime for a token whose `exp` can't be read — refresh soon-ish. */
+const UNKNOWN_TOKEN_LIFETIME_MS = 4 * 60_000;
+
+/**
+ * When the access token should next be refreshed: its real `exp`. Falls back to
+ * a short window when `exp` is missing/unparseable, so a malformed token wedges
+ * the app neither into never refreshing nor into a refresh storm.
+ */
+export function computeNextTokenRefresh(token: string): Date {
+  const exp = getJwtExpMs(token);
+  return exp !== null
+    ? new Date(exp)
+    : new Date(Date.now() + UNKNOWN_TOKEN_LIFETIME_MS);
+}
