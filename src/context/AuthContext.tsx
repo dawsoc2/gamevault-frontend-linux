@@ -16,6 +16,11 @@ import {
   normalizeServerUrl,
 } from "@/utils/authConfig";
 import { isTauriApp } from "@/utils/tauri";
+import {
+  RefreshError,
+  classifyRefreshError,
+  classifyRefreshStatus,
+} from "@/utils/authTokens";
 import { useOnlineStatus } from "@/context/OfflineContext";
 
 const AUTH_CACHED_USER_KEY = "app_cached_user";
@@ -156,10 +161,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       body: "",
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok)
-      throw new Error(
-        `Refresh failed (${res.status}): ${(await res.text()) || res.statusText}`,
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")) || res.statusText;
+      throw new RefreshError(
+        classifyRefreshStatus(res.status),
+        `Refresh failed (${res.status}): ${detail}`,
+        res.status,
       );
+    }
     return res.json();
   }
   async function fetchCurrentUser(): Promise<GamevaultUser> {
@@ -184,6 +193,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const threshold = Date.now() + 60_000;
     return nxt.getTime() <= threshold;
   }, []);
+
+  const logout = useCallback(() => {
+    offlineModeRef.current = false;
+    authRef.current = null;
+    nextTokenRefreshRef.current = null;
+    setAuth(null);
+    setUser(null);
+    setError(null);
+    localStorage.removeItem(AUTH_REFRESH_STORAGE_KEY);
+  }, []);
+
+  /**
+   * Decide what to do when a token refresh fails:
+   *  - fatal (server rejected the refresh token, HTTP 400/401/403): the session
+   *    is gone — log out so the user lands on the sign-in screen.
+   *  - transient (network error / timeout / 5xx): keep the token. On desktop,
+   *    drop into offline mode with a cooldown so the cached UI keeps working;
+   *    on the web there is nothing to fall back to, so log out.
+   */
+  const applyRefreshFailure = useCallback(
+    (err: unknown) => {
+      if (classifyRefreshError(err) === "fatal") {
+        console.log("[auth] refresh rejected — session is gone, logging out");
+        logout();
+        return;
+      }
+      if (isTauriApp() && localStorage.getItem(AUTH_REFRESH_STORAGE_KEY)) {
+        console.log(
+          "[auth] refresh failed (transient) — entering offline mode, cooldown 30s",
+        );
+        offlineModeRef.current = true;
+        offlineRefreshCooldownRef.current = Date.now() + 30_000;
+      } else {
+        logout();
+      }
+    },
+    [logout],
+  );
+
   /**
    * Refresh the token pair. All refresh traffic funnels through here: concurrent
    * callers (bootstrap, ensureFreshToken, the reconnect handler, and later the
@@ -226,45 +274,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       return;
     }
-    // In offline mode: try the refresh. If network fails, stay offline silently.
-    // If it succeeds, performRefresh clears offlineModeRef and we exit offline mode.
+    // In offline mode: try the refresh. On success performRefresh clears
+    // offlineModeRef and we exit offline mode; on failure applyRefreshFailure
+    // either re-cools-down (transient) or logs out (dead token).
     if (offlineModeRef.current) {
-      console.log("[auth] ensureFreshToken: offline mode, attempting refresh...");
       // Cooldown: don't spam failed refresh attempts while truly offline
-      if (Date.now() < offlineRefreshCooldownRef.current) {
-        console.log("[auth] ensureFreshToken: refresh cooldown active, skipping");
-        return;
-      }
+      if (Date.now() < offlineRefreshCooldownRef.current) return;
       try {
         await performRefresh();
-        console.log("[auth] ensureFreshToken: offline refresh SUCCEEDED, exiting offline mode");
       } catch (e) {
-        // Network down — set cooldown and stay offline
-        console.log("[auth] ensureFreshToken: offline refresh failed, cooldown 30s:", e instanceof Error ? e.message : String(e));
-        offlineRefreshCooldownRef.current = Date.now() + 30_000;
+        applyRefreshFailure(e);
       }
       return;
     }
-    // Normal online path
-    if (!authRef.current?.access_token) { console.log("[auth] ensureFreshToken: no access_token"); return; }
+    // Normal online path — only refresh when the token is close to expiring.
+    if (!authRef.current?.access_token) return;
     if (!isTokenNearExpiry()) return;
     try {
       await performRefresh();
     } catch (e) {
-      console.log("[auth] normal refresh failed:", e instanceof Error ? e.message : String(e));
-      // Network error while online? If Tauri + stored creds, re-enter offline mode.
-      // Only logout if this is a genuine auth failure (not a network blip).
-      if (isTauriApp() && localStorage.getItem(AUTH_REFRESH_STORAGE_KEY)) {
-        console.log("[auth] network failure, re-entering offline mode");
-        offlineModeRef.current = true;
-        offlineRefreshCooldownRef.current = Date.now() + 30_000;
-      } else {
-        logout();
-      }
+      applyRefreshFailure(e);
     }
-    // logout is a stable useCallback declared below; omitted from deps to avoid
-    // referencing it before initialization during render.
-  }, [isTokenNearExpiry, performRefresh]);
+  }, [isTokenNearExpiry, performRefresh, applyRefreshFailure]);
 
   const authFetch = useCallback(
     async (input: string, init?: RequestInit) => {
@@ -438,7 +469,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               try {
                 const cachedUser: GamevaultUser = JSON.parse(cachedUserRaw);
                 offlineModeRef.current = true;
-                authRef.current = { access_token: storedRefresh, refresh_token: storedRefresh };
+                // access_token stays empty — never send the refresh token as a
+                // Bearer access token. offlineModeRef gates network use.
+                authRef.current = { access_token: "", refresh_token: storedRefresh };
                 nextTokenRefreshRef.current = new Date(Date.now() + 24 * 60 * 60 * 1000);
                 setAuth(authRef.current);
                 setUser(cachedUser);
@@ -463,18 +496,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch (e) {
         console.log("[bootstrap] refresh/fetch failed:", e instanceof Error ? e.message : String(e));
-        // In Tauri mode: if refresh fails (likely network error), try offline bootstrap
-        if (isTauriApp()) {
+        if (classifyRefreshError(e) === "fatal") {
+          // The stored refresh token was rejected by the server — it is dead.
+          // Clear it; ProtectedRoute then shows the login screen.
+          console.log("[bootstrap] refresh token rejected, clearing session");
+          logout();
+        } else if (isTauriApp()) {
+          // Transient failure (network / server unreachable) — fall back to
+          // offline bootstrap if we have a cached user.
           const cachedUserRaw = localStorage.getItem(AUTH_CACHED_USER_KEY);
           console.log("[bootstrap] cachedUser exists:", !!cachedUserRaw);
           if (cachedUserRaw) {
             try {
               const cachedUser: GamevaultUser = JSON.parse(cachedUserRaw);
               console.log("[bootstrap] entering OFFLINE MODE with cached user:", cachedUser.username);
-              // Reconstruct minimal auth from stored refresh token
+              // Reconstruct minimal auth from the stored refresh token. access_token
+              // stays empty — offlineModeRef gates network use until we recover.
               offlineModeRef.current = true;
-              authRef.current = { access_token: storedRefresh, refresh_token: storedRefresh };
-              // Push expiry 24h out so ensureFreshToken won't try to refresh
+              authRef.current = { access_token: "", refresh_token: storedRefresh };
+              // Push expiry out so isTokenNearExpiry stays false; ensureFreshToken's
+              // offline branch drives recovery.
               nextTokenRefreshRef.current = new Date(Date.now() + 24 * 60 * 60 * 1000);
               setAuth(authRef.current);
               setUser(cachedUser);
@@ -511,8 +552,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unregister = onReconnect(async () => {
       console.log("[auth] reconnect callback fired, refreshing...");
-      // performRefresh clears offlineModeRef on success. On failure, stay offline —
-      // ensureFreshToken's offline branch retries with a cooldown.
+      // performRefresh clears offlineModeRef on success. On failure,
+      // applyRefreshFailure stays offline (transient) or logs out (dead token).
       if (!localStorage.getItem(AUTH_REFRESH_STORAGE_KEY)) return;
 
       try {
@@ -522,22 +563,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(me);
         console.log("[auth] re-authenticated successfully");
       } catch (e) {
-        console.log("[auth] reconnect refresh failed, staying offline:", e instanceof Error ? e.message : String(e));
+        applyRefreshFailure(e);
       }
     });
 
     return unregister;
-  }, [onReconnect, performRefresh]);
-
-  const logout = useCallback(() => {
-    offlineModeRef.current = false;
-    authRef.current = null;
-    nextTokenRefreshRef.current = null;
-    setAuth(null);
-    setUser(null);
-    setError(null);
-    localStorage.removeItem(AUTH_REFRESH_STORAGE_KEY);
-  }, []);
+  }, [onReconnect, performRefresh, applyRefreshFailure]);
 
   const refreshCurrentUser = useCallback(async () => {
     try {
