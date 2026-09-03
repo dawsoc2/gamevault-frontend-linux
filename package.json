@@ -13,6 +13,7 @@
     "debug": "vite dev server",
     "tauridev": "tauri dev",
     "build": "vite build",
+    "sidecar": "node scripts/fetch-ludusavi.mjs",
     "test": "vitest run",
     "lint": "prettier --write . && eslint .",
     "licenses": "node scripts/generate-third-party-licenses.mjs",

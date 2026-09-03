@@ -198,6 +198,9 @@ jobs:
           GV_API_SPEC_PATH: ${{ steps.api-spec.outputs.file }}
         run: pnpm install --frozen-lockfile --strict-peer-dependencies
 
+      - name: Fetch Ludusavi sidecar
+        run: node scripts/fetch-ludusavi.mjs
+
       - name: Validate updater signing configuration
         shell: bash
         env:

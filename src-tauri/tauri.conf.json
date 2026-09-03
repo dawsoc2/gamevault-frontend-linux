@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "pnpm start",
-    "beforeBuildCommand": "pnpm build"
+    "beforeDevCommand": "pnpm sidecar && pnpm start",
+    "beforeBuildCommand": "pnpm sidecar && pnpm build"
   },
   "app": {
     "windows": [
@@ -28,6 +28,8 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "app", "dmg", "appimage", "deb"],
+    "externalBin": ["binaries/ludusavi"],
+    "resources": { "LICENSE-ludusavi.txt": "LICENSE-ludusavi.txt" },
     "publisher": "Phalcode",
     "license": "CC BY-NC-SA 4.0",
     "homepage": "https://gamevau.lt",

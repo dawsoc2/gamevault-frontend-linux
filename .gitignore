@@ -10,6 +10,9 @@ lerna-debug.log*
 # Generated API
 src/api
 
+# Ludusavi sidecar (fetched at build time by scripts/fetch-ludusavi.mjs)
+src-tauri/binaries/
+
 node_modules
 dist
 dist-ssr

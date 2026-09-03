@@ -28,6 +28,7 @@ import {
 import { useParams, useNavigate } from "react-router";
 import {
   CloudArrowDownIcon,
+  CloudArrowUpIcon,
   Cog8ToothIcon,
   ShareIcon,
   StarIcon as StarSolid,
@@ -41,6 +42,7 @@ import {
   GlobeAltIcon,
   HashtagIcon,
   ChevronLeftIcon,
+  ArrowPathIcon,
 } from "@heroicons/react/24/outline";
 import clsx from "clsx";
 import {
@@ -54,9 +56,22 @@ import { Alert, AlertTitle } from "@tw/alert";
 import { GameSettings } from "@/components/admin/GameSettings";
 import { useAuthMediaUrl } from "@/hooks/useAuthMediaUrl";
 import { useInstalledGames } from "@/hooks/useInstalledGames";
+import { useSaveSync } from "@/hooks/useSaveSync";
 import { isTauriApp } from "@/utils/tauri";
 import { LayoutGroup, motion } from "motion/react";
 import { EASE_OUT } from "@/lib/motion";
+
+function formatRelativeTime(timestamp: number): string {
+  const seconds = Math.round((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
 
 export default function GameView() {
   const { id } = useParams<{ id: string }>();
@@ -92,6 +107,7 @@ export default function GameView() {
     () => installedGames.find((ig) => ig.gameId === numericId),
     [installedGames, numericId],
   );
+  const saveSync = useSaveSync(game, installedInfo);
   const backgroundMediaId = game?.metadata?.background?.id;
   const { url: backgroundUrl } = useAuthMediaUrl(
     backgroundMediaId,
@@ -306,6 +322,17 @@ export default function GameView() {
       title: "Link copied",
     });
   }, [showAlert]);
+
+  const handleSaveSync = useCallback(
+    async (action: "upload" | "download") => {
+      const result =
+        action === "upload"
+          ? await saveSync.upload()
+          : await saveSync.download();
+      showAlert({ title: result.message });
+    },
+    [saveSync, showAlert],
+  );
 
   const resolveVersions = useCallback(async (): Promise<GameVersion[]> => {
     if (game && Array.isArray(game.versions) && game.versions.length > 0) {
@@ -856,12 +883,78 @@ export default function GameView() {
                   >
                     <ShareIcon className="w-5 h-5" />
                   </Button>
+                  {saveSync.canSync && (
+                    <Dropdown>
+                      <DropdownButton
+                        as={Button}
+                        outline
+                        disabled={saveSync.busy !== null}
+                        className={floatingIconButtonClassName}
+                        title="Cloud saves"
+                        aria-label="Cloud saves"
+                      >
+                        {saveSync.busy ? (
+                          <ArrowPathIcon className="w-5 h-5 motion-safe:animate-spin" />
+                        ) : (
+                          <CloudArrowUpIcon className="w-5 h-5" />
+                        )}
+                      </DropdownButton>
+                      <DropdownMenu className="min-w-56" anchor="bottom end">
+                        <DropdownItem
+                          onClick={() => void handleSaveSync("upload")}
+                          disabled={saveSync.busy !== null}
+                        >
+                          <CloudArrowUpIcon />
+                          <DropdownLabel>Upload save to server</DropdownLabel>
+                        </DropdownItem>
+                        <DropdownItem
+                          onClick={() => void handleSaveSync("download")}
+                          disabled={saveSync.busy !== null}
+                        >
+                          <CloudArrowDownIcon />
+                          <DropdownLabel>
+                            Download save from server
+                          </DropdownLabel>
+                        </DropdownItem>
+                        {saveSync.lastSynced && (
+                          <div className="px-3.5 pt-1.5 text-xs text-gv-muted">
+                            {saveSync.lastSynced.direction === "upload"
+                              ? "Uploaded "
+                              : "Downloaded "}
+                            {formatRelativeTime(saveSync.lastSynced.at)}
+                          </div>
+                        )}
+                      </DropdownMenu>
+                    </Dropdown>
+                  )}
                 </div>
                 {(genres && genres.length > 0) ||
                 game?.type ||
                 game?.early_access ||
-                (game as any)?.metadata?.early_access ? (
+                (game as any)?.metadata?.early_access ||
+                (saveSync.enabled &&
+                  (saveSync.status === "compatible" ||
+                    saveSync.status === "incompatible" ||
+                    saveSync.status === "unavailable")) ? (
                   <div className="flex flex-wrap gap-1 pt-1 items-center">
+                    {saveSync.enabled && saveSync.status === "compatible" && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-gv-accent/15 px-2 py-0.5 text-[10px] font-medium text-gv-accent-strong">
+                        <CloudArrowUpIcon className="size-3" />
+                        Cloud Saves
+                      </span>
+                    )}
+                    {saveSync.enabled && saveSync.status === "incompatible" && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-gv-panel-strong px-2 py-0.5 text-[10px] font-medium text-gv-muted">
+                        <CloudArrowUpIcon className="size-3" />
+                        Saves not recognized
+                      </span>
+                    )}
+                    {saveSync.enabled && saveSync.status === "unavailable" && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-gv-panel-strong px-2 py-0.5 text-[10px] font-medium text-gv-muted">
+                        <CloudArrowUpIcon className="size-3" />
+                        Cloud Saves unavailable
+                      </span>
+                    )}
                     {game?.type && game.type !== "UNDETECTABLE" && (
                       <span className="px-2 py-0.5 rounded-full bg-gv-accent/15 text-gv-accent-strong text-[10px] font-medium">
                         {game.type

@@ -12,6 +12,7 @@ mod settings;
 mod net;
 mod youtube;
 mod oauth;
+mod savefiles;
 
 use crate::settings::AppSettings;
 use semver::Version;
@@ -431,7 +432,10 @@ pub fn run() {
       is_updater_enabled,
       check_for_app_update,
       download_and_install_app_update,
-      oauth::oauth2_login
+      oauth::oauth2_login,
+      savefiles::savefile_probe,
+      savefiles::savefile_backup,
+      savefiles::savefile_restore
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

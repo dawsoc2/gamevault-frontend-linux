@@ -31,6 +31,7 @@ import {
   DialogTitle,
 } from "@/components/tailwind/dialog";
 import { isAnalyticsEnabled, setAnalyticsEnabled } from "@/utils/analytics";
+import { isCloudSavesEnabled, setCloudSavesEnabled } from "@/utils/savefiles";
 import { playSound } from "@/utils/audio";
 import { VolumeControl } from "@/components/VolumeControl";
 import {
@@ -387,6 +388,9 @@ export default function Settings() {
       return false;
     }
   });
+  const [cloudSavesEnabled, setCloudSavesEnabledState] = useState<boolean>(() =>
+    isCloudSavesEnabled(),
+  );
   const isTauri = isTauriApp();
   const systemInfo = collectSystemInfo(isTauri);
   const { ignoreList, setIgnoreList } = useIgnoreList();
@@ -509,6 +513,10 @@ export default function Settings() {
       console.warn("Failed to persist auto-delete preference");
     }
   }, [autoDeleteSource]);
+
+  useEffect(() => {
+    setCloudSavesEnabled(cloudSavesEnabled);
+  }, [cloudSavesEnabled]);
 
   const handleSpeedChange = (raw: number) => {
     if (Number.isNaN(raw) || raw <= 0) {
@@ -1013,6 +1021,26 @@ export default function Settings() {
                             aria-label="Delete downloaded and extracted files after portable game install"
                             checked={autoDeleteSource}
                             onChange={(v: boolean) => setAutoDeleteSource(v)}
+                          />
+                        </SettingsRow>
+                      </SettingsGroup>
+                    )}
+
+                    {isTauri && (
+                      <SettingsGroup caption="Cloud saves">
+                        <SettingsRow>
+                          <SettingsLabel
+                            title="Enable Cloud Saves"
+                            description="Sync game saves with your GameVault server (needs SAVEFILES_ENABLED=true on the server). Games are matched with Ludusavi, so detection is not guaranteed for every DRM-free title."
+                          />
+                          <Switch
+                            name="cloudSaves"
+                            color="indigo"
+                            aria-label="Enable cloud saves"
+                            checked={cloudSavesEnabled}
+                            onChange={(v: boolean) =>
+                              setCloudSavesEnabledState(v)
+                            }
                           />
                         </SettingsRow>
                       </SettingsGroup>

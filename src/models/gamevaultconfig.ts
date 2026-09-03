@@ -9,4 +9,6 @@ export interface GameVaultConfig {
   launchexecutable?: string;
   launchparameters?: string;
   launchasadmin?: boolean;
+  /** Stable per-installation UUID v4, sent as X-Installation-Id when syncing saves. */
+  installationid?: string;
 }
