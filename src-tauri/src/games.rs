@@ -287,6 +287,11 @@ pub(crate) fn collect_launch_candidates(root: &Path, current: &Path, results: &m
       if mode & 0o111 == 0 {
         continue;
       }
+      // The exec bit alone is unreliable — GOG installers `chmod +x *` whole
+      // game directories. Require an ELF/shebang header (or a script extension).
+      if !crate::util::looks_launchable(&path) {
+        continue;
+      }
     }
 
     if let Ok(relative) = path.strip_prefix(root) {
@@ -713,7 +718,7 @@ fn spawn_launch_monitor(
 
 #[cfg(test)]
 mod tests {
-  use super::validate_external_url;
+  use super::{collect_launch_candidates, validate_external_url};
 
   #[test]
   fn accepts_http_and_https_urls() {
@@ -725,5 +730,32 @@ mod tests {
   fn rejects_non_web_urls() {
     assert!(validate_external_url("file:///C:/games/image.png").is_err());
     assert!(validate_external_url("javascript:alert(1)").is_err());
+  }
+
+  #[cfg(not(windows))]
+  #[test]
+  fn launch_candidates_skip_exec_bit_data_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("game")).unwrap();
+
+    let write_exec = |rel: &str, bytes: &[u8]| {
+      let p = root.join(rel);
+      std::fs::write(&p, bytes).unwrap();
+      std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // GOG's `chmod +x *` marks every data file executable.
+    write_exec("game/VO_0001.wav", b"RIFF\x00\x00\x00\x00WAVE");
+    write_exec("game/dialog.tlk", b"TLK V1  ");
+    write_exec("game/BaldursGate", b"\x7fELF\x02\x01\x01\x00");
+    write_exec("start.sh", b"#!/bin/bash\nexec game/BaldursGate\n");
+
+    let mut results = Vec::new();
+    collect_launch_candidates(root, root, &mut results).unwrap();
+    results.sort();
+
+    assert_eq!(results, vec!["game/BaldursGate".to_string(), "start.sh".to_string()]);
   }
 }

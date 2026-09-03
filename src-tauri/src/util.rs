@@ -73,6 +73,50 @@ mod tests {
   fn falls_back_to_legacy_folder_version_id() {
     assert_eq!(resolve_version_id(&json!({}), 775), 775);
   }
+
+  #[cfg(not(windows))]
+  #[test]
+  fn path_key_resolves_symlinked_parents() {
+    use super::path_key;
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let bin = real.join("game.bin");
+    std::fs::write(&bin, b"x").unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    // Same file reached through a symlinked parent yields the same key — this is
+    // the /proc/<pid>/exe vs configured-install-path case.
+    assert_eq!(path_key(&link.join("game.bin")), path_key(&bin));
+  }
+
+  #[cfg(not(windows))]
+  #[test]
+  fn looks_launchable_accepts_binaries_and_scripts_only() {
+    use super::looks_launchable;
+    let dir = tempfile::tempdir().unwrap();
+
+    let elf = dir.path().join("BaldursGate");
+    std::fs::write(&elf, b"\x7fELF\x02\x01\x01\x00 rest of header").unwrap();
+    assert!(looks_launchable(&elf));
+
+    let shebang = dir.path().join("launcher");
+    std::fs::write(&shebang, b"#!/bin/bash\nexec ./game\n").unwrap();
+    assert!(looks_launchable(&shebang));
+
+    let wav = dir.path().join("VO_NARRATOR_0001.wav");
+    std::fs::write(&wav, b"RIFF\x24\x08\x00\x00WAVEfmt ").unwrap();
+    assert!(!looks_launchable(&wav));
+
+    // Extension safety net: a shebang-less *.sh still counts (the picker showed
+    // it before, and stripping it would be a regression).
+    let bare = dir.path().join("run.sh");
+    std::fs::write(&bare, b"echo no shebang here\n").unwrap();
+    assert!(looks_launchable(&bare));
+
+    assert!(!looks_launchable(&dir.path().join("missing")));
+  }
 }
 
 pub(crate) fn read_saved_game_metadata(start_path: &Path) -> Option<serde_json::Value> {
@@ -165,25 +209,21 @@ pub(crate) fn run_elevated_installer_and_wait(
   Err(message)
 }
 
-/// Compare two paths for equality.
-/// Windows: case-insensitive with canonicalized separators.
-/// Linux: exact match.
-pub(crate) fn paths_match(a: &Path, b: &Path) -> bool {
+/// Normalize a path into a key for equality comparison.
+/// Windows: lower-cased with back-slash separators (canonicalize there yields
+/// verbatim `\\?\` paths that don't compare against ordinary paths).
+/// Non-Windows: symlinks resolved. `/proc/<pid>/exe` is always canonicalized,
+/// while a path built from the configured install directory may still contain
+/// symlinks, so canonicalizing both sides lets a game launched through a
+/// symlinked path still match.
+pub(crate) fn path_key(path: &Path) -> PathBuf {
   #[cfg(windows)]
   {
-    let a_str = a.to_string_lossy().to_lowercase().replace('/', "\\");
-    let b_str = b.to_string_lossy().to_lowercase().replace('/', "\\");
-    a_str == b_str
+    PathBuf::from(path.to_string_lossy().to_lowercase().replace('/', "\\"))
   }
   #[cfg(not(windows))]
   {
-    // The process exe reported by /proc/<pid>/exe is canonicalized (symlinks
-    // resolved), while the game exe path is built from the configured install
-    // directory which may itself contain symlinks. Canonicalize before
-    // comparing so a game launched through a symlinked path still matches.
-    let a = fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let b = fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    a == b
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
   }
 }
 
@@ -197,4 +237,27 @@ pub(crate) fn is_ignored_executable(path: &Path, ignored: &[String]) -> bool {
   ignored
     .iter()
     .any(|name| name.to_lowercase() == stem_lower)
+}
+
+/// True when a file that carries the exec bit is plausibly launchable: a known
+/// script extension, an ELF binary (`\x7fELF`), or a shebang (`#!`). Rejects data
+/// files that merely inherited the exec bit — e.g. a GOG installer that runs
+/// `chmod +x *` across the whole game directory, leaving thousands of `.wav` /
+/// `.bif` files marked executable.
+#[cfg(not(windows))]
+pub(crate) fn looks_launchable(path: &Path) -> bool {
+  if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if matches!(
+      ext.to_ascii_lowercase().as_str(),
+      "sh" | "bash" | "zsh" | "run" | "command"
+    ) {
+      return true;
+    }
+  }
+  let Ok(mut file) = fs::File::open(path) else {
+    return false;
+  };
+  let mut buf = [0u8; 4];
+  let n = std::io::Read::read(&mut file, &mut buf).unwrap_or(0);
+  buf[..n].starts_with(b"\x7fELF") || buf[..n].starts_with(b"#!")
 }

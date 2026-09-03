@@ -25,8 +25,11 @@ export function useGameTimeTracker() {
       // If tracker was running but credentials are gone (logout), stop it
       if (startedRef.current) {
         startedRef.current = null;
+        console.info("[time-tracker] stopping (credentials cleared)");
         import("@tauri-apps/api/core").then(({ invoke }) => {
-          invoke("stop_game_time_tracker").catch(() => {});
+          invoke("stop_game_time_tracker").catch((e) =>
+            console.warn("[time-tracker] stop_game_time_tracker failed", e),
+          );
         });
       }
       return;
@@ -45,10 +48,13 @@ export function useGameTimeTracker() {
     // New session or a changed server/user — (re)start with fresh credentials.
     if (started) {
       import("@tauri-apps/api/core").then(({ invoke }) => {
-        invoke("stop_game_time_tracker").catch(() => {});
+        invoke("stop_game_time_tracker").catch((e) =>
+          console.warn("[time-tracker] stop_game_time_tracker failed", e),
+        );
       });
     }
     startedRef.current = { serverUrl, userId };
+    console.info("[time-tracker] starting", { serverUrl, userId, downloadPaths });
     import("@tauri-apps/api/core").then(({ invoke }) => {
       invoke("start_game_time_tracker", {
         serverUrl,
@@ -56,7 +62,9 @@ export function useGameTimeTracker() {
         accessToken,
         downloadPath: null,
         downloadPaths,
-      }).catch(() => {});
+      }).catch((e) =>
+        console.warn("[time-tracker] start_game_time_tracker failed", e),
+      );
     });
   }, [serverUrl, user?.id, auth?.access_token]);
 
@@ -64,8 +72,11 @@ export function useGameTimeTracker() {
   useEffect(() => {
     return () => {
       startedRef.current = null;
+      if (!isTauriApp()) return;
       import("@tauri-apps/api/core").then(({ invoke }) => {
-        invoke("stop_game_time_tracker").catch(() => {});
+        invoke("stop_game_time_tracker").catch((e) =>
+          console.warn("[time-tracker] stop_game_time_tracker failed", e),
+        );
       });
     };
   }, []);
@@ -77,7 +88,9 @@ export function useGameTimeTracker() {
     if (!accessToken) return;
 
     import("@tauri-apps/api/core").then(({ invoke }) => {
-      invoke("update_tracker_auth", { accessToken }).catch(() => {});
+      invoke("update_tracker_auth", { accessToken }).catch((e) =>
+        console.warn("[time-tracker] update_tracker_auth failed", e),
+      );
     });
   }, [auth?.access_token]);
 

@@ -77,6 +77,44 @@ Uncheck "Remember me" on login if you want the refresh token removed right after
 
 If backend endpoints change, update the paths in `AuthContext` and the admin hook.
 
+## Playtime Tracking
+
+The desktop app records playtime for installed games. A background loop in
+`src-tauri/src/time_tracker.rs` wakes every 60s, scans running processes, and for
+any installed game that is running sends
+`PUT /api/progresses/user/<id>/game/<id>/increment` (one minute per tick). On a
+network failure the minute is written to `.gamevault.offline_time.json` next to the
+game and flushed on the next reconnect. Game launch is fully decoupled — the loop
+discovers the running game by polling, not from the "Play" button.
+
+### Verifying it works
+
+The tracker logs through `tauri-plugin-log` (enabled in debug **and** release
+builds). Watch the log while a game runs:
+
+- Dev: `pnpm tauridev`, logs go to stdout and `~/.local/share/com.phalcode.gamevault/logs/gamevault.log`.
+- Packaged: run the binary from a terminal; logs also go to `~/.local/share/<identifier>/logs/`.
+
+Expected lines (one per minute, per running game):
+
+```
+INFO  app_lib::time_tracker  playtime +1min: "Hollow Knight" (game 42) -> HTTP 204
+```
+
+`DEBUG` lines (candidate executables, `match: … <- pid …`, the request URL, and
+`tick: no tracked game running`) are on for the `app_lib::time_tracker` target.
+A non-2xx response is logged as `WARN playtime NOT recorded: … -> HTTP 401`.
+
+To avoid waiting a full minute per increment, set
+`GAMEVAULT_TRACKER_INTERVAL_SECS` (minimum 1) before launching the app:
+
+```bash
+GAMEVAULT_TRACKER_INTERVAL_SECS=5 pnpm tauridev
+```
+
+This is **test-only** — the server still counts a fixed 1 minute per tick, so a
+short interval over-reports playtime.
+
 ## Desktop Auto-Updates
 
 The desktop app (Tauri) updates itself from GitHub Releases.
