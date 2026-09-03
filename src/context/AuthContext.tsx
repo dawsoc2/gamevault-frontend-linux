@@ -16,9 +16,27 @@ import {
   normalizeServerUrl,
 } from "@/utils/authConfig";
 import { isTauriApp } from "@/utils/tauri";
+import {
+  RefreshError,
+  classifyRefreshError,
+  classifyRefreshStatus,
+  computeNextTokenRefresh,
+  getJwtExpMs,
+  shouldRetryRefresh,
+} from "@/utils/authTokens";
 import { useOnlineStatus } from "@/context/OfflineContext";
 
 const AUTH_CACHED_USER_KEY = "app_cached_user";
+
+/** Per-attempt timeout for POST /api/auth/refresh. */
+const REFRESH_TIMEOUT_MS = 15_000;
+/** Backoff before retry attempts 2 and 3 (indices 0 and 1). */
+const REFRESH_RETRY_DELAYS_MS = [1_000, 3_000];
+/**
+ * How far before the access token's expiry to refresh it — used both by the
+ * proactive timer and by isTokenNearExpiry's lazy check so they agree.
+ */
+const REFRESH_LEAD_MS = 90_000;
 
 interface LoginArgs {
   server: string;
@@ -49,61 +67,6 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-
-interface InternalJwtPayload {
-  exp?: number;
-  Exp?: number;
-  iat?: number;
-  Iat?: number;
-  creation?: number;
-  Creation?: number;
-  [k: string]: any;
-}
-
-function base64UrlDecode(segment: string): string {
-  try {
-    let s = segment.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = s.length % 4;
-    if (pad) s += "=".repeat(4 - pad);
-    if (typeof atob === "function") return atob(s);
-    // Fallback minimal polyfill (browser-only target; Node Buffer not available without types)
-    // If atob missing (older env), attempt TextDecoder on Uint8Array decode path
-    if (typeof window === "undefined") return "";
-    // @ts-ignore - TypeScript may not know atob is defined in some envs
-    return atob(s);
-  } catch {
-    return "";
-  }
-}
-function parseJwt(token: string): InternalJwtPayload | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const json = base64UrlDecode(parts[1]);
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-function computeNextTokenRefresh(token: string): Date {
-  const payload = parseJwt(token);
-  if (!payload) return new Date();
-  const exp = payload.Exp ?? payload.exp;
-  const creation =
-    payload.Creation ?? payload.creation ?? payload.iat ?? payload.Iat;
-  const now = Date.now();
-  if (
-    typeof exp === "number" &&
-    typeof creation === "number" &&
-    exp > creation
-  ) {
-    const lifetimeSec = exp - creation;
-    return new Date(now + lifetimeSec * 1000);
-  } else if (typeof exp === "number") {
-    return new Date(exp * 1000);
-  }
-  return new Date();
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [serverUrl, setServerUrl] = useState("");
@@ -145,7 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
     return res.json();
   }
-  async function refreshWithToken(refreshToken: string): Promise<AuthTokens> {
+  async function refreshOnce(refreshToken: string): Promise<AuthTokens> {
     const res = await fetch(`${serverRef.current}/api/auth/refresh`, {
       method: "POST",
       headers: {
@@ -154,13 +117,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         "Content-Type": "application/json",
       },
       body: "",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
-    if (!res.ok)
-      throw new Error(
-        `Refresh failed (${res.status}): ${(await res.text()) || res.statusText}`,
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")) || res.statusText;
+      throw new RefreshError(
+        classifyRefreshStatus(res.status),
+        `Refresh failed (${res.status}): ${detail}`,
+        res.status,
       );
+    }
     return res.json();
+  }
+  /**
+   * Refresh, retrying transient failures (network error, timeout, 5xx/429) a few
+   * times so a brief blip doesn't strand the client on a token the server has
+   * already rotated away. A fatal RefreshError (400/401/403) is re-thrown at once.
+   */
+  async function refreshWithToken(refreshToken: string): Promise<AuthTokens> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await refreshOnce(refreshToken);
+      } catch (e) {
+        if (!shouldRetryRefresh(attempt, e)) throw e;
+        const backoff = REFRESH_RETRY_DELAYS_MS[attempt - 1] ?? 3_000;
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
+    }
   }
   async function fetchCurrentUser(): Promise<GamevaultUser> {
     const res = await authFetch(`${serverRef.current}/api/users/me`);
@@ -181,89 +164,143 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isTokenNearExpiry = useCallback(() => {
     const nxt = nextTokenRefreshRef.current;
     if (!nxt) return true;
-    const threshold = Date.now() + 60_000;
-    return nxt.getTime() <= threshold;
+    return nxt.getTime() <= Date.now() + REFRESH_LEAD_MS;
   }, []);
-  const performRefresh = useCallback(async () => {
-    const refreshToken =
-      authRef.current?.refresh_token ||
-      localStorage.getItem(AUTH_REFRESH_STORAGE_KEY);
-    if (!refreshToken) throw new Error("Missing refresh token");
-    const data = await refreshWithToken(refreshToken);
-    if (!data?.access_token)
-      throw new Error("Refresh response missing access_token");
-    const merged: AuthTokens = { ...(authRef.current || {}), ...data };
-    authRef.current = merged;
-    setAuth(merged);
-    if (merged.refresh_token)
-      localStorage.setItem(
-        AUTH_REFRESH_STORAGE_KEY,
-        merged.refresh_token,
-      );
-    nextTokenRefreshRef.current = computeNextTokenRefresh(merged.access_token);
-    offlineModeRef.current = false; // successfully refreshed, exit offline mode
+
+  const logout = useCallback(() => {
+    offlineModeRef.current = false;
+    authRef.current = null;
+    nextTokenRefreshRef.current = null;
+    setAuth(null);
+    setUser(null);
+    setError(null);
+    localStorage.removeItem(AUTH_REFRESH_STORAGE_KEY);
   }, []);
-  const ensureFreshToken = useCallback(async () => {
-    // In offline mode: try the refresh. If network fails, stay offline silently.
-    // If it succeeds, performRefresh clears offlineModeRef and we exit offline mode.
-    if (offlineModeRef.current) {
-      console.log("[auth] ensureFreshToken: offline mode, attempting refresh...");
-      // Cooldown: don't spam failed refresh attempts while truly offline
-      if (Date.now() < offlineRefreshCooldownRef.current) {
-        console.log("[auth] ensureFreshToken: refresh cooldown active, skipping");
+
+  /**
+   * Decide what to do when a token refresh fails:
+   *  - fatal (server rejected the refresh token, HTTP 400/401/403): the session
+   *    is gone — log out so the user lands on the sign-in screen.
+   *  - transient (network error / timeout / 5xx): keep the token. On desktop,
+   *    drop into offline mode with a cooldown so the cached UI keeps working;
+   *    on the web there is nothing to fall back to, so log out.
+   */
+  const applyRefreshFailure = useCallback(
+    (err: unknown) => {
+      if (classifyRefreshError(err) === "fatal") {
+        console.log("[auth] refresh rejected — session is gone, logging out");
+        logout();
         return;
       }
-      if (refreshInFlightRef.current) return refreshInFlightRef.current;
-      refreshInFlightRef.current = (async () => {
-        try {
-          await performRefresh();
-          console.log("[auth] ensureFreshToken: offline refresh SUCCEEDED, exiting offline mode");
-        } catch (e) {
-          // Network down — set cooldown and stay offline
-          console.log("[auth] ensureFreshToken: offline refresh failed, cooldown 30s:", e instanceof Error ? e.message : String(e));
-          offlineRefreshCooldownRef.current = Date.now() + 30_000;
-        } finally {
-          refreshInFlightRef.current = null;
-        }
-      })();
-      return refreshInFlightRef.current;
-    }
-    // Normal online path
-    if (!authRef.current?.access_token) { console.log("[auth] ensureFreshToken: no access_token"); return; }
-    if (!isTokenNearExpiry()) return;
+      if (isTauriApp() && localStorage.getItem(AUTH_REFRESH_STORAGE_KEY)) {
+        console.log(
+          "[auth] refresh failed (transient) — entering offline mode, cooldown 30s",
+        );
+        offlineModeRef.current = true;
+        offlineRefreshCooldownRef.current = Date.now() + 30_000;
+      } else {
+        logout();
+      }
+    },
+    [logout],
+  );
+
+  /**
+   * Refresh the token pair. All refresh traffic funnels through here: concurrent
+   * callers (bootstrap, ensureFreshToken, the reconnect handler, and later the
+   * proactive timer / authFetch's 401 retry) share one in-flight request so the
+   * server's single-use refresh token is never spent twice in parallel.
+   */
+  const performRefresh = useCallback(async (): Promise<void> => {
     if (refreshInFlightRef.current) return refreshInFlightRef.current;
-    refreshInFlightRef.current = (async () => {
+    const run = (async () => {
+      const refreshToken =
+        authRef.current?.refresh_token ||
+        localStorage.getItem(AUTH_REFRESH_STORAGE_KEY);
+      if (!refreshToken) throw new Error("Missing refresh token");
+      const data = await refreshWithToken(refreshToken);
+      if (!data?.access_token)
+        throw new Error("Refresh response missing access_token");
+      const merged: AuthTokens = { ...(authRef.current || {}), ...data };
+      // Persist the rotated refresh token first — synchronously, before any
+      // React state update — so an interruption (crash, reload) can't leave the
+      // next launch holding a token the server has already invalidated.
+      if (merged.refresh_token)
+        localStorage.setItem(AUTH_REFRESH_STORAGE_KEY, merged.refresh_token);
+      authRef.current = merged;
+      nextTokenRefreshRef.current = computeNextTokenRefresh(
+        merged.access_token,
+      );
+      offlineModeRef.current = false; // successfully refreshed, exit offline mode
+      setAuth(merged);
+    })();
+    refreshInFlightRef.current = run;
+    try {
+      await run;
+    } finally {
+      if (refreshInFlightRef.current === run) refreshInFlightRef.current = null;
+    }
+  }, []);
+  const ensureFreshToken = useCallback(async () => {
+    // A refresh is already in flight (another authFetch, the reconnect handler,
+    // and later the proactive timer / authFetch's 401 retry) — just wait for it.
+    if (refreshInFlightRef.current) {
+      try {
+        await refreshInFlightRef.current;
+      } catch {
+        /* the caller that initiated the refresh owns failure handling */
+      }
+      return;
+    }
+    // In offline mode: try the refresh. On success performRefresh clears
+    // offlineModeRef and we exit offline mode; on failure applyRefreshFailure
+    // either re-cools-down (transient) or logs out (dead token).
+    if (offlineModeRef.current) {
+      // Cooldown: don't spam failed refresh attempts while truly offline
+      if (Date.now() < offlineRefreshCooldownRef.current) return;
       try {
         await performRefresh();
       } catch (e) {
-        console.log("[auth] normal refresh failed:", e instanceof Error ? e.message : String(e));
-        // Network error while online? If Tauri + stored creds, re-enter offline mode.
-        // Only logout if this is a genuine auth failure (not a network blip).
-        if (isTauriApp() && localStorage.getItem(AUTH_REFRESH_STORAGE_KEY)) {
-          console.log("[auth] network failure, re-entering offline mode");
-          offlineModeRef.current = true;
-          offlineRefreshCooldownRef.current = Date.now() + 30_000;
-        } else {
-          logout();
-        }
-      } finally {
-        refreshInFlightRef.current = null;
+        applyRefreshFailure(e);
       }
-    })();
-    return refreshInFlightRef.current;
-  }, [isTokenNearExpiry, performRefresh]);
+      return;
+    }
+    // Normal online path — only refresh when the token is close to expiring.
+    if (!authRef.current?.access_token) return;
+    if (!isTokenNearExpiry()) return;
+    try {
+      await performRefresh();
+    } catch (e) {
+      applyRefreshFailure(e);
+    }
+  }, [isTokenNearExpiry, performRefresh, applyRefreshFailure]);
 
   const authFetch = useCallback(
     async (input: string, init?: RequestInit) => {
       await ensureFreshToken();
-      const token = authRef.current?.access_token;
-      const headers = new Headers(init?.headers || {});
-      if (token && !headers.has("Authorization"))
-        headers.set("Authorization", "Bearer " + token);
-      headers.set("Accept", "*/*");
-      return fetch(input, { ...(init || {}), headers });
+      const send = () => {
+        const token = authRef.current?.access_token;
+        const headers = new Headers(init?.headers || {});
+        if (token && !headers.has("Authorization"))
+          headers.set("Authorization", "Bearer " + token);
+        headers.set("Accept", "*/*");
+        return fetch(input, { ...(init || {}), headers });
+      };
+      const res = await send();
+      // One transparent retry on 401: an access token can be rejected a few
+      // seconds early (clock skew, a backend that hasn't caught up with the
+      // rotation). Force a refresh and resend once. Skipped in offline mode; a
+      // streaming init.body could not be replayed, but no call site sends one.
+      if (res.status !== 401 || offlineModeRef.current) return res;
+      try {
+        await performRefresh();
+      } catch (e) {
+        applyRefreshFailure(e);
+        return res;
+      }
+      return send();
     },
-    [ensureFreshToken],
+    [ensureFreshToken, performRefresh, applyRefreshFailure],
   );
 
   const loginBasic = useCallback(
@@ -425,7 +462,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               try {
                 const cachedUser: GamevaultUser = JSON.parse(cachedUserRaw);
                 offlineModeRef.current = true;
-                authRef.current = { access_token: storedRefresh, refresh_token: storedRefresh };
+                // access_token stays empty — never send the refresh token as a
+                // Bearer access token. offlineModeRef gates network use.
+                authRef.current = { access_token: "", refresh_token: storedRefresh };
                 nextTokenRefreshRef.current = new Date(Date.now() + 24 * 60 * 60 * 1000);
                 setAuth(authRef.current);
                 setUser(cachedUser);
@@ -437,21 +476,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         : null;
 
       try {
-        console.log("[bootstrap] trying refreshWithToken...");
-        const tokens = await refreshWithToken(storedRefresh);
+        console.log("[bootstrap] refreshing stored token...");
+        // authRef is null here, so performRefresh reads the stored refresh token.
+        await performRefresh();
         console.log("[bootstrap] refresh succeeded, fetching user...");
-        if (!tokens.access_token)
-          throw new Error("No access_token in refresh response");
-        authRef.current = tokens;
-        setAuth(tokens);
-        if (tokens.refresh_token)
-          localStorage.setItem(
-            AUTH_REFRESH_STORAGE_KEY,
-            tokens.refresh_token,
-          );
-        nextTokenRefreshRef.current = computeNextTokenRefresh(
-          tokens.access_token,
-        );
         const me = await fetchCurrentUser();
         setUser(me);
         if (isTauriApp()) {
@@ -461,18 +489,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch (e) {
         console.log("[bootstrap] refresh/fetch failed:", e instanceof Error ? e.message : String(e));
-        // In Tauri mode: if refresh fails (likely network error), try offline bootstrap
-        if (isTauriApp()) {
+        if (classifyRefreshError(e) === "fatal") {
+          // The stored refresh token was rejected by the server — it is dead.
+          // Clear it; ProtectedRoute then shows the login screen.
+          console.log("[bootstrap] refresh token rejected, clearing session");
+          logout();
+        } else if (isTauriApp()) {
+          // Transient failure (network / server unreachable) — fall back to
+          // offline bootstrap if we have a cached user.
           const cachedUserRaw = localStorage.getItem(AUTH_CACHED_USER_KEY);
           console.log("[bootstrap] cachedUser exists:", !!cachedUserRaw);
           if (cachedUserRaw) {
             try {
               const cachedUser: GamevaultUser = JSON.parse(cachedUserRaw);
               console.log("[bootstrap] entering OFFLINE MODE with cached user:", cachedUser.username);
-              // Reconstruct minimal auth from stored refresh token
+              // Reconstruct minimal auth from the stored refresh token. access_token
+              // stays empty — offlineModeRef gates network use until we recover.
               offlineModeRef.current = true;
-              authRef.current = { access_token: storedRefresh, refresh_token: storedRefresh };
-              // Push expiry 24h out so ensureFreshToken won't try to refresh
+              authRef.current = { access_token: "", refresh_token: storedRefresh };
+              // Push expiry out so isTokenNearExpiry stays false; ensureFreshToken's
+              // offline branch drives recovery.
               nextTokenRefreshRef.current = new Date(Date.now() + 24 * 60 * 60 * 1000);
               setAuth(authRef.current);
               setUser(cachedUser);
@@ -509,42 +545,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unregister = onReconnect(async () => {
       console.log("[auth] reconnect callback fired, refreshing...");
-      // Don't clear offlineModeRef — let performRefresh handle it on success.
-      // If refresh fails, ensureFreshToken's offline branch will retry with cooldown.
-      const storedRefresh = localStorage.getItem(AUTH_REFRESH_STORAGE_KEY);
-      if (!storedRefresh) return;
+      // performRefresh clears offlineModeRef on success. On failure,
+      // applyRefreshFailure stays offline (transient) or logs out (dead token).
+      if (!localStorage.getItem(AUTH_REFRESH_STORAGE_KEY)) return;
 
       try {
-        const tokens = await refreshWithToken(storedRefresh);
-        if (!tokens.access_token) throw new Error("No access_token");
-        authRef.current = tokens;
-        setAuth(tokens);
-        if (tokens.refresh_token) {
-          localStorage.setItem(AUTH_REFRESH_STORAGE_KEY, tokens.refresh_token);
-        }
-        nextTokenRefreshRef.current = computeNextTokenRefresh(tokens.access_token);
-        offlineModeRef.current = false;
+        await performRefresh();
         // Re-fetch user data now that we're back online
         const me = await fetchCurrentUser();
         setUser(me);
         console.log("[auth] re-authenticated successfully");
       } catch (e) {
-        console.log("[auth] reconnect refresh failed, staying offline:", e instanceof Error ? e.message : String(e));
+        applyRefreshFailure(e);
       }
     });
 
     return unregister;
-  }, [onReconnect]);
+  }, [onReconnect, performRefresh, applyRefreshFailure]);
 
-  const logout = useCallback(() => {
-    offlineModeRef.current = false;
-    authRef.current = null;
-    nextTokenRefreshRef.current = null;
-    setAuth(null);
-    setUser(null);
-    setError(null);
-    localStorage.removeItem(AUTH_REFRESH_STORAGE_KEY);
-  }, []);
+  // Proactively refresh the access token shortly before it expires, so it stays
+  // valid even when nothing is calling authFetch (idle UI, the Rust play-time
+  // tracker, which picks up the new token via useGameTimeTracker). Re-arms
+  // whenever the token changes — i.e. after every successful refresh.
+  useEffect(() => {
+    const token = auth?.access_token;
+    if (!token || offlineModeRef.current) return;
+    const expMs = getJwtExpMs(token);
+    if (expMs === null) return;
+    // Floor the delay so a token that arrives already near expiry (bad server
+    // clock, very short TTL) degrades to a slow refresh loop, not a hot one.
+    const delay = Math.max(15_000, expMs - REFRESH_LEAD_MS - Date.now());
+    const timer = setTimeout(() => {
+      if (offlineModeRef.current) return;
+      void performRefresh().catch(applyRefreshFailure);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [auth?.access_token, performRefresh, applyRefreshFailure]);
 
   const refreshCurrentUser = useCallback(async () => {
     try {
