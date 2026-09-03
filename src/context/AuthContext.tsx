@@ -20,10 +20,16 @@ import {
   RefreshError,
   classifyRefreshError,
   classifyRefreshStatus,
+  shouldRetryRefresh,
 } from "@/utils/authTokens";
 import { useOnlineStatus } from "@/context/OfflineContext";
 
 const AUTH_CACHED_USER_KEY = "app_cached_user";
+
+/** Per-attempt timeout for POST /api/auth/refresh. */
+const REFRESH_TIMEOUT_MS = 15_000;
+/** Backoff before retry attempts 2 and 3 (indices 0 and 1). */
+const REFRESH_RETRY_DELAYS_MS = [1_000, 3_000];
 
 interface LoginArgs {
   server: string;
@@ -150,7 +156,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
     return res.json();
   }
-  async function refreshWithToken(refreshToken: string): Promise<AuthTokens> {
+  async function refreshOnce(refreshToken: string): Promise<AuthTokens> {
     const res = await fetch(`${serverRef.current}/api/auth/refresh`, {
       method: "POST",
       headers: {
@@ -159,7 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         "Content-Type": "application/json",
       },
       body: "",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const detail = (await res.text().catch(() => "")) || res.statusText;
@@ -170,6 +176,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
     }
     return res.json();
+  }
+  /**
+   * Refresh, retrying transient failures (network error, timeout, 5xx/429) a few
+   * times so a brief blip doesn't strand the client on a token the server has
+   * already rotated away. A fatal RefreshError (400/401/403) is re-thrown at once.
+   */
+  async function refreshWithToken(refreshToken: string): Promise<AuthTokens> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await refreshOnce(refreshToken);
+      } catch (e) {
+        if (!shouldRetryRefresh(attempt, e)) throw e;
+        const backoff = REFRESH_RETRY_DELAYS_MS[attempt - 1] ?? 3_000;
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
+    }
   }
   async function fetchCurrentUser(): Promise<GamevaultUser> {
     const res = await authFetch(`${serverRef.current}/api/users/me`);
@@ -249,12 +271,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!data?.access_token)
         throw new Error("Refresh response missing access_token");
       const merged: AuthTokens = { ...(authRef.current || {}), ...data };
-      authRef.current = merged;
-      setAuth(merged);
+      // Persist the rotated refresh token first — synchronously, before any
+      // React state update — so an interruption (crash, reload) can't leave the
+      // next launch holding a token the server has already invalidated.
       if (merged.refresh_token)
         localStorage.setItem(AUTH_REFRESH_STORAGE_KEY, merged.refresh_token);
+      authRef.current = merged;
       nextTokenRefreshRef.current = computeNextTokenRefresh(merged.access_token);
       offlineModeRef.current = false; // successfully refreshed, exit offline mode
+      setAuth(merged);
     })();
     refreshInFlightRef.current = run;
     try {

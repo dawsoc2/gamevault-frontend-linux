@@ -47,3 +47,18 @@ export function classifyRefreshStatus(status: number): RefreshFailureKind {
 export function classifyRefreshError(err: unknown): RefreshFailureKind {
   return err instanceof RefreshError ? err.kind : "transient";
 }
+
+/** Maximum attempts for a single token refresh (initial request + retries). */
+export const REFRESH_MAX_ATTEMPTS = 3;
+
+/**
+ * Whether a just-failed refresh attempt should be retried. `attempt` is 1-based
+ * (the attempt that just failed). Only transient failures are retried, and only
+ * up to {@link REFRESH_MAX_ATTEMPTS} — a fatal (rejected-token) failure will
+ * never succeed on retry.
+ */
+export function shouldRetryRefresh(attempt: number, err: unknown): boolean {
+  return (
+    attempt < REFRESH_MAX_ATTEMPTS && classifyRefreshError(err) === "transient"
+  );
+}

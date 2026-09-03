@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  REFRESH_MAX_ATTEMPTS,
   RefreshError,
   classifyRefreshError,
   classifyRefreshStatus,
+  shouldRetryRefresh,
 } from "./authTokens";
 
 describe("classifyRefreshStatus", () => {
@@ -43,6 +45,30 @@ describe("classifyRefreshError", () => {
     expect(classifyRefreshError(new Error("boom"))).toBe("transient");
     expect(classifyRefreshError("nope")).toBe("transient");
     expect(classifyRefreshError(undefined)).toBe("transient");
+  });
+});
+
+describe("shouldRetryRefresh", () => {
+  it("retries transient failures until the attempt cap", () => {
+    expect(shouldRetryRefresh(1, new TypeError("network"))).toBe(true);
+    expect(
+      shouldRetryRefresh(REFRESH_MAX_ATTEMPTS - 1, new TypeError("x")),
+    ).toBe(true);
+    expect(shouldRetryRefresh(REFRESH_MAX_ATTEMPTS, new TypeError("x"))).toBe(
+      false,
+    );
+  });
+
+  it("never retries a fatal (rejected-token) failure", () => {
+    expect(
+      shouldRetryRefresh(1, new RefreshError("fatal", "revoked", 401)),
+    ).toBe(false);
+  });
+
+  it("retries a transient RefreshError (5xx / 429)", () => {
+    expect(
+      shouldRetryRefresh(1, new RefreshError("transient", "bad gateway", 502)),
+    ).toBe(true);
   });
 });
 
