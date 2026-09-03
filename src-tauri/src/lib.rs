@@ -298,13 +298,16 @@ pub fn run() {
       // working in packaged builds (tauri-apps/tauri#14422).
       youtube::start_embed_server();
 
-      if cfg!(debug_assertions) {
-        app.handle().plugin(
-          tauri_plugin_log::Builder::default()
-            .level(log::LevelFilter::Info)
-            .build(),
-        )?;
-      }
+      // Enabled in release too so the packaged app produces a log file — the
+      // playtime tracker logs each recorded minute here (see time_tracker.rs).
+      app.handle().plugin(
+        tauri_plugin_log::Builder::default()
+          .level(log::LevelFilter::Info)
+          // Verbose tracker internals (candidate exes, process matches) without
+          // flooding every other module.
+          .level_for("app_lib::time_tracker", log::LevelFilter::Debug)
+          .build(),
+      )?;
 
       // ── System tray with Show / Quit menu ──────────────────────────────
 
