@@ -2,6 +2,22 @@
 
 React 19 + Vite + Tailwind (v4) powered frontend for the GameVault platform.
 
+## Attribution & Fork Notice
+
+This is a **modified fork** of the original [GameVault Web Frontend](https://github.com/Phalcode/gamevault-frontend)
+by **Phalcode** (Alkan Alper, Schäfer Philip GbR). All credit for the original
+application goes to them.
+
+This fork exists specifically to add and improve **Linux desktop support** —
+for example native Linux game installers (GOG-style `.sh`), correct Linux
+uninstaller handling, a separate SSO login window on the desktop app, and the
+bundled Ludusavi save-file sync sidecar. Changes have been made relative to
+upstream and are not endorsed by Phalcode.
+
+The original is licensed under **CC BY-NC-SA 4.0**, and this fork is
+distributed under the same license (see [LICENSE](LICENSE)). Non-commercial use
+only; derivatives must keep this attribution and the same license.
+
 ## Tech Stack
 
 - PNPM
