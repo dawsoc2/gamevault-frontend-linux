@@ -32,6 +32,10 @@ import {
 } from "@/components/tailwind/dialog";
 import { isAnalyticsEnabled, setAnalyticsEnabled } from "@/utils/analytics";
 import { isCloudSavesEnabled, setCloudSavesEnabled } from "@/utils/savefiles";
+import {
+  isTrailerAutoplayEnabled,
+  setTrailerAutoplayEnabled,
+} from "@/utils/media";
 import { playSound } from "@/utils/audio";
 import { VolumeControl } from "@/components/VolumeControl";
 import {
@@ -391,6 +395,9 @@ export default function Settings() {
   const [cloudSavesEnabled, setCloudSavesEnabledState] = useState<boolean>(() =>
     isCloudSavesEnabled(),
   );
+  const [trailerAutoplay, setTrailerAutoplay] = useState<boolean>(() =>
+    isTrailerAutoplayEnabled(),
+  );
   const isTauri = isTauriApp();
   const systemInfo = collectSystemInfo(isTauri);
   const { ignoreList, setIgnoreList } = useIgnoreList();
@@ -517,6 +524,10 @@ export default function Settings() {
   useEffect(() => {
     setCloudSavesEnabled(cloudSavesEnabled);
   }, [cloudSavesEnabled]);
+
+  useEffect(() => {
+    setTrailerAutoplayEnabled(trailerAutoplay);
+  }, [trailerAutoplay]);
 
   const handleSpeedChange = (raw: number) => {
     if (Number.isNaN(raw) || raw <= 0) {
@@ -1067,6 +1078,21 @@ export default function Settings() {
                           aria-label="Retain Library sorting and filter preferences"
                           checked={retainLibraryPrefs}
                           onChange={(v: boolean) => setRetainLibraryPrefs(v)}
+                        />
+                      </SettingsRow>
+                    </SettingsGroup>
+                    <SettingsGroup caption="Game pages">
+                      <SettingsRow>
+                        <SettingsLabel
+                          title="Autoplay trailers"
+                          description="Automatically start playing a game's trailer when you open its page. When off, trailers and screenshots are still shown but nothing plays until you press play."
+                        />
+                        <Switch
+                          name="trailerAutoplay"
+                          color="indigo"
+                          aria-label="Autoplay trailers on game pages"
+                          checked={trailerAutoplay}
+                          onChange={(v: boolean) => setTrailerAutoplay(v)}
                         />
                       </SettingsRow>
                     </SettingsGroup>

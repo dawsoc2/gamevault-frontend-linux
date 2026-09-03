@@ -58,6 +58,7 @@ import { useAuthMediaUrl } from "@/hooks/useAuthMediaUrl";
 import { useInstalledGames } from "@/hooks/useInstalledGames";
 import { useSaveSync } from "@/hooks/useSaveSync";
 import { isTauriApp } from "@/utils/tauri";
+import { isTrailerAutoplayEnabled } from "@/utils/media";
 import { LayoutGroup, motion } from "motion/react";
 import { EASE_OUT } from "@/lib/motion";
 
@@ -161,6 +162,7 @@ export default function GameView() {
     ...((game as any)?.metadata?.url_gameplays || []),
   ];
   const screenshots = game?.metadata?.url_screenshots || [];
+  const trailerAutoplay = isTrailerAutoplayEnabled();
   const title = game?.metadata?.title || game?.title;
   const description = game?.metadata?.description || null;
   const notes = (game as any)?.metadata?.notes || "";
@@ -1054,7 +1056,7 @@ export default function GameView() {
                   <MediaSlider
                     trailers={trailers}
                     screenshots={screenshots}
-                    autoPlay={true}
+                    autoPlay={trailerAutoplay}
                     loop={false}
                     className="w-full"
                     aspect="aspect-[16/9]"
