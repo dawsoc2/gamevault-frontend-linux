@@ -48,8 +48,18 @@ fn extract_tokens(url: &tauri::Url) -> Option<OAuthTokens> {
 /// of the session. The popup gets no capability grants at all (it isn't
 /// listed in any capability's "windows"), so it can never invoke dialog/fs
 /// regardless of what content it displays.
+///
+/// This command MUST stay `async`. Tauri runs sync commands inline on the
+/// main thread, and building a `WebviewWindow` from the main thread
+/// deadlocks on Windows and Linux: `.build()` blocks waiting for the
+/// webview's controller to initialize, but that init is driven by the very
+/// event loop the blocked thread would otherwise be pumping. An `async`
+/// command is spawned off the main thread, so `.build()` can dispatch the
+/// creation to a free event loop and wait on it safely. (WebKitGTK happened
+/// to tolerate the sync version, so this only surfaced once we built for
+/// Windows / WebView2.)
 #[tauri::command]
-pub(crate) fn oauth2_login(app: tauri::AppHandle, server: String) -> Result<(), String> {
+pub(crate) async fn oauth2_login(app: tauri::AppHandle, server: String) -> Result<(), String> {
   if let Some(existing) = app.get_webview_window("oauth") {
     let _ = existing.set_focus();
     return Ok(());
@@ -66,9 +76,17 @@ pub(crate) fn oauth2_login(app: tauri::AppHandle, server: String) -> Result<(), 
     .on_navigation(move |url| {
       if let Some(tokens) = extract_tokens(url) {
         let _ = app_handle.emit("oauth2-callback", tokens);
-        if let Some(window) = app_handle.get_webview_window("oauth") {
-          let _ = window.close();
-        }
+        // Close off the event loop, not from inside this navigation
+        // callback: the callback runs on the main (UI) thread on Windows,
+        // and closing the window synchronously from here re-enters the
+        // event loop while it is mid-dispatch. Spawning hands the close to
+        // a free turn of the loop once this handler returns.
+        let close_handle = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+          if let Some(window) = close_handle.get_webview_window("oauth") {
+            let _ = window.close();
+          }
+        });
         return false;
       }
       true
