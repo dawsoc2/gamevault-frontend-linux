@@ -8,6 +8,15 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
+  server: {
+    watch: {
+      // Rust build artifacts under src-tauri/target churn constantly during
+      // `tauri dev`, and on Windows the .dll files get locked mid-compile,
+      // which makes Vite's recursive watcher throw `EBUSY`. Tauri watches and
+      // rebuilds itself, so Vite never needs to see anything under src-tauri.
+      ignored: ["**/src-tauri/**"],
+    },
+  },
   build: {
     // Acknowledges the larger vendor/analytics bundles produced by rolldown.
     chunkSizeWarningLimit: 1000,
