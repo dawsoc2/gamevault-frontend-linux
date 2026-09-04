@@ -143,3 +143,25 @@ The choice is persisted in `localStorage` (`gv_update_channel`).
 Generate the keys once with `cargo tauri signer generate -w ~/.tauri/gamevault-updater.key`. Keep the private key and password safe — losing them breaks updates for existing installs.
 
 **Local builds** – a normal `tauri build` produces no updater artifacts. To create them locally, build with the release config and signing env (`pnpm tauri build --config src-tauri/tauri.release.conf.json`). CI uses `src-tauri/tauri.release.generated.json` with the pubkey injected, since the Tauri bundler requires `plugins.updater.pubkey` in the parsed config.
+
+## Release-candidate binaries
+
+`scripts/build-rc.sh` builds local RC installers into `dist-rc/17.0.0-rc.<N>/`
+(auto-incrementing `<N>`), each with a `.sig` and a `SHA256SUMS`:
+
+```bash
+pnpm install
+scripts/build-rc.sh            # linux-x64 (.deb + AppImage) + windows-x64 (NSIS .exe)
+scripts/build-rc.sh linux      # linux only
+scripts/build-rc.sh windows    # windows only
+```
+
+It signs with a **throwaway** updater key kept in `.rc-build/` (both gitignored), so
+"Check for updates" does not work on an RC build — that is expected.
+
+The Windows target is cross-compiled from Linux with `cargo-xwin`; the script checks
+for the host prerequisites and prints what to install (`clang-19 lld-19`, `nsis`,
+`cargo-xwin`, the `x86_64-pc-windows-msvc` rustup target). It also applies a small
+`unrar_sys` build-script fix (`scripts/rc-build/unrar_sys-build.rs`) for the duration
+of the build — the upstream crate's `build.rs` inspects the build host instead of the
+target and breaks cross-compilation.

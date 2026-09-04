@@ -21,6 +21,10 @@ release-assets/
 updater-metadata/
 src-tauri/tauri.release.generated.json
 
+# Local release-candidate builds (scripts/build-rc.sh)
+dist-rc/
+.rc-build/
+
 # Editor directories and files
 .vscode-edge-profile/*
 !.vscode/extensions.json
